@@ -25,6 +25,9 @@ YDL_OPTS = {
     "no_warnings": True,
     "default_search": "ytsearch",
     "source_address": "0.0.0.0",  # IPv4 を使う (IPv6 でブロックされがち)
+    # YouTube のチャレンジ解決 (EJS) 用。yt-dlp[default] が yt-dlp-ejs を同梱する。
+    # node / bun / deno のどれかが PATH にあれば使う。
+    "js_runtimes": {"node": {}, "bun": {}, "deno": {}},
 }
 FFMPEG_OPTS = {
     "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
