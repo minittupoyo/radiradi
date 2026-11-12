@@ -1,0 +1,99 @@
+name: ffmpeg
+
+# BOT 用の最小構成 ffmpeg を amd64 / arm64 でビルドし、GitHub Release に載せる。
+# 本体の Dockerfile はこのリリースからバイナリを取得する。
+on:
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "同名のリリースが既にあっても、アセットを上書きする"
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+    paths:
+      - docker/ffmpeg/**
+      - .github/workflows/ffmpeg.yml
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build ffmpeg
+        run: docker buildx build --target binary --output type=local,dest=out docker/ffmpeg
+
+      - name: Smoke test
+        # 実行側と同じベースイメージで、必要な機能が入っていることを確認する
+        run: |
+          set -euo pipefail
+          run() { docker run --rm -v "$PWD/out/ffmpeg:/ffmpeg:ro" --entrypoint /ffmpeg python:3.12-slim -hide_banner "$@"; }
+          run -version | head -1
+          run -muxers    | grep -qw s16le     # s16le 出力 (discord.py が使う)
+          run -protocols | grep -qx '  https' # HTTPS 入力
+          for d in matroska hls mov; do       # YouTube の WebM / HLS / m4a
+            run -demuxers | grep -qw "$d"
+          done
+
+      - name: Prepare asset
+        run: mv out/ffmpeg "ffmpeg-linux-${{ matrix.arch }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ffmpeg-linux-${{ matrix.arch }}
+          path: ffmpeg-linux-${{ matrix.arch }}
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          set -eu
+          version=$(sed -n 's/^ARG FFMPEG_VERSION=//p' docker/ffmpeg/Dockerfile)
+          revision=$(sed -n 's/^ARG FFMPEG_REVISION=//p' docker/ffmpeg/Dockerfile)
+          tag="ffmpeg-${version}-r${revision}"
+          echo "tag: ${tag}"
+
+          cd assets
+          chmod +x ffmpeg-linux-*
+          sha256sum ffmpeg-linux-* | tee SHA256SUMS
+
+          if gh release view "${tag}" >/dev/null 2>&1; then
+            if [ "${FORCE}" = "true" ]; then
+              gh release upload "${tag}" ffmpeg-linux-* SHA256SUMS --clobber
+            else
+              echo "::notice::release ${tag} already exists; skipped. Bump FFMPEG_REVISION, or run manually with force."
+            fi
+          else
+            gh release create "${tag}" ffmpeg-linux-* SHA256SUMS \
+              --title "ffmpeg ${version} (r${revision})" \
+              --notes "Minimal ffmpeg ${version} build for radiradi (audio decode only). Built from docker/ffmpeg/Dockerfile."
+          fi
